@@ -37,20 +37,6 @@ else:
     app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{DB_PATH}"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# 关键：启用SSL，并指定psycopg2驱动
-if db_url.startswith("postgresql://"):
-    # 替换为psycopg2驱动格式，并添加SSL参数
-    db_url = db_url.replace("postgresql://", "postgresql+psycopg2://")
-    app.config["SQLALCHEMY_DATABASE_URI"] = f"{db_url}?sslmode=require"
-
-# 适配Vercel Serverless环境：关闭连接池
-app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-    "poolclass": NullPool,  # 避免连接池耗尽
-    "connect_args": {"connect_timeout": 10}  # 设置10秒超时，防止无限等待
-}
-
-db = SQLAlchemy(app)
-
 from sqlalchemy.exc import OperationalError
 
 db.init_app(app)
