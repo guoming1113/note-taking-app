@@ -1,3 +1,4 @@
+import os
 from flask import Blueprint, jsonify, request
 from src.models.note import Note, db
 from src.llm import translate_note, process_user_notes
@@ -6,122 +7,121 @@ from datetime import datetime
 from datetime import date as date_cls, timedelta
 import re
 from src.utils.date_utils import normalize_date, normalize_time, extract_date_from_text, extract_time_from_text
+from supabase import create_client, Client
 
 note_bp = Blueprint('note', __name__)
 
+# 初始化Supabase客户端（新增代码）
+SUPABASE_URL = os.environ.get('SUPABASE_URL')
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("请在.env文件中配置SUPABASE_URL和SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)  # 创建Supabase客户端实例
+
+# 获取所有笔记（使用 Supabase 客户端）
 @note_bp.route('/notes', methods=['GET'])
 def get_notes():
-    """Get all notes, ordered by most recently updated"""
-    notes = Note.query.order_by(Note.updated_at.desc()).all()
-    return jsonify([note.to_dict() for note in notes])
+    try:
+        # 调用 Supabase 表查询
+        response = supabase.table('note').select('*').order('updated_at', desc=True).execute()
+        # 处理响应数据
+        if response.data:
+            return jsonify(response.data)
+        return jsonify([])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
+# 替换原 SQLAlchemy 插入逻辑
 @note_bp.route('/notes', methods=['POST'])
 def create_note():
-    """Create a new note"""
     try:
         data = request.json
         if not data or 'title' not in data or 'content' not in data:
             return jsonify({'error': 'Title and content are required'}), 400
 
-        note = Note(title=data['title'], content=data['content'])
-        # optional fields
-        tags = data.get('tags')
-        if tags:
-            # accept list or comma-separated string
-            if isinstance(tags, list):
-                note.tags = json.dumps(tags)
-            else:
-                note.tags = json.dumps([t.strip() for t in str(tags).split(',') if t.strip()])
+        # 处理标签（转为JSON字符串，与原逻辑一致）
+        tags = data.get('tags', [])
+        # 确保 tags 是数组（处理前端可能传入的字符串情况）
+        if not isinstance(tags, list):
+            tags = [t.strip() for t in str(tags).split(',') if t.strip()]  # 字符串转数组
 
-        event_date = data.get('event_date')
-        if event_date:
-            try:
-                note.event_date = datetime.fromisoformat(event_date).date()
-            except Exception:
-                pass
+        # 构造插入数据
+        note_data = {
+            'title': data['title'],
+            'content': data['content'],
+            'tags': tags,
+            'event_date': data.get('event_date'),
+            'start_time': data.get('start_time'),
+            'created_at': datetime.utcnow().isoformat(),
+            'updated_at': datetime.utcnow().isoformat()
+        }
 
-        start_time = data.get('start_time')
-        if start_time:
-            try:
-                note.start_time = datetime.strptime(start_time, '%H:%M').time()
-            except Exception:
-                pass
-        db.session.add(note)
-        db.session.commit()
-        return jsonify(note.to_dict()), 201
+        response = supabase.table('note').insert(note_data).execute()
+        return jsonify(response.data[0]), 201  # 返回创建的笔记
     except Exception as e:
-        db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
+# 替换原 SQLAlchemy 查询
 @note_bp.route('/notes/<int:note_id>', methods=['GET'])
 def get_note(note_id):
-    """Get a specific note by ID"""
-    note = Note.query.get_or_404(note_id)
-    return jsonify(note.to_dict())
+    try:
+        response = supabase.table('note').select('*').eq('id', note_id).single().execute()
+        return jsonify(response.data)
+    except Exception as e:
+        return jsonify({'error': 'Note not found'}), 404
 
+# 替换原 SQLAlchemy 更新逻辑
 @note_bp.route('/notes/<int:note_id>', methods=['PUT'])
 def update_note(note_id):
-    """Update a specific note"""
     try:
-        note = Note.query.get_or_404(note_id)
         data = request.json
-        
         if not data:
             return jsonify({'error': 'No data provided'}), 400
-        
-        note.title = data.get('title', note.title)
-        note.content = data.get('content', note.content)
-        # optional fields
+
+        # 处理标签
         tags = data.get('tags')
-        if tags is not None:
-            if isinstance(tags, list):
-                note.tags = json.dumps(tags)
-            else:
-                note.tags = json.dumps([t.strip() for t in str(tags).split(',') if t.strip()])
+        if tags is not None and not isinstance(tags, list):
+            tags = [t.strip() for t in str(tags).split(',') if t.strip()]  # 确保是数组
 
-        event_date = data.get('event_date')
-        if event_date is not None:
-            try:
-                note.event_date = datetime.fromisoformat(event_date).date() if event_date else None
-            except Exception:
-                pass
+        # 构造更新数据
+        update_data = {
+            'title': data.get('title'),
+            'content': data.get('content'),
+            'tags': tags,
+            'event_date': data.get('event_date'),
+            'start_time': data.get('start_time'),
+            'updated_at': datetime.utcnow().isoformat()
+        }
+        # 过滤空值（不更新未提供的字段）
+        update_data = {k: v for k, v in update_data.items() if v is not None}
 
-        start_time = data.get('start_time')
-        if start_time is not None:
-            try:
-                note.start_time = datetime.strptime(start_time, '%H:%M').time() if start_time else None
-            except Exception:
-                pass
-        db.session.commit()
-        return jsonify(note.to_dict())
+        response = supabase.table('note').update(update_data).eq('id', note_id).execute()
+        return jsonify(response.data[0])
     except Exception as e:
-        db.session.rollback()
         return jsonify({'error': str(e)}), 500
-
+    
+# 替换原 SQLAlchemy 删除逻辑
 @note_bp.route('/notes/<int:note_id>', methods=['DELETE'])
 def delete_note(note_id):
-    """Delete a specific note"""
     try:
-        note = Note.query.get_or_404(note_id)
-        db.session.delete(note)
-        db.session.commit()
+        supabase.table('note').delete().eq('id', note_id).execute()
         return '', 204
     except Exception as e:
-        db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
+# 替换原 SQLAlchemy 搜索逻辑
 @note_bp.route('/notes/search', methods=['GET'])
 def search_notes():
-    """Search notes by title or content"""
     query = request.args.get('q', '')
     if not query:
         return jsonify([])
     
-    notes = Note.query.filter(
-        (Note.title.contains(query)) | (Note.content.contains(query))
-    ).order_by(Note.updated_at.desc()).all()
-    
-    return jsonify([note.to_dict() for note in notes])
+    try:
+        # 使用 ilike 实现模糊搜索
+        response = supabase.table('note').select('*').ilike('title', f'%{query}%').or_(f'content.ilike.%{query}%').order('updated_at', desc=True).execute()
+        return jsonify(response.data if response.data else [])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @note_bp.route('/notes/translate', methods = ['POST'])
 def translate_note_api():
